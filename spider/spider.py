@@ -264,15 +264,15 @@ class Spider:
 
             response = Response(url, response_header)
             # 传输编码
-            transfer_encoding = response.get('Transfer-Encoding', '').strip()
+            transfer_encoding = response.get('Transfer-Encoding', '')
             if transfer_encoding == 'chunked':
                 body = await self._read_chunk_data(reader)
             else:
-                content_length = int(response.get('Content-Length', '0').strip())
+                content_length = int(response.get('Content-Length', '0')
                 body = await reader.readexactly(content_length)
             
             # 内容编码
-            content_encoding = response.get('Content-Encoding', '').strip()
+            content_encoding = response.get('Content-Encoding', '')
             if content_encoding == 'gzip':
                 body = self._gzip_decompress(body)
             elif content_encoding == 'deflate':

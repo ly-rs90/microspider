@@ -109,7 +109,7 @@ class Response:
             # 将每个响应行存入字典
             for line in lines[1:]:
                 items = line.split(':')
-                self._header[items[0]] = ':'.join(items[1:])
+                self._header[items[0]] = ':'.join(items[1:]).strip()
         except Exception as e:
             Logger.log(f'解析HTTP响应头失败，详情：{e}')
     
