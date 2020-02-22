@@ -40,14 +40,20 @@ class Spider:
         # 具体任务队列，每个key(域名)对应一个队列
         self._task = dict()
 
-        # 任务运行数量信息
-        self._worker = dict()
+        # 每个域名对应的空位
+        self._free_domain = dict()
 
-        # 空闲队列
+        # 总的空闲队列
         self._free_queue = None
 
         # 已经处理的url
         self._handled_urls = set()
+
+        # 当前正在处理的url
+        self._handling = []
+
+        # 正在运行的任务
+        self._running_task = dict()
 
         # 时间基准
         self._base_time = time.time()
@@ -67,22 +73,23 @@ class Spider:
         """
         pass
 
+    async def _init(self):
+        """初始化"""
+        loop = asyncio.get_running_loop()
+        self._free_queue = Queue(self.MAX_REQUEST_TOTAL)
+        self._task_done = loop.create_future()
+
+        # 初始化空闲队列
+        for _ in range(self.MAX_REQUEST_TOTAL):
+            await self._free_queue.put(1)
+        
+        asyncio.create_task(self._record())
+
     async def _task_schedule(self, *url):
-        """初始化工作"""
 
         try:
-            # 当前事件循环
-            loop = asyncio.get_running_loop()
-            self._task_wait_handle = Queue(loop=loop)
-            self._free_queue = Queue(self.MAX_REQUEST_TOTAL, loop=loop)
-            self._task_done = loop.create_future()
-
-            # 初始MAX_REQUEST_TOTAL个工作者位置
-            for _ in range(self.MAX_REQUEST_TOTAL):
-                await self._free_queue.put(1)
-
+            await self._init()
             await self.add_task(*url)
-            asyncio.create_task(self._record())
             await self._task_done
 
             avg = self._completed / (time.time() - self._base_time) * 60
@@ -91,15 +98,19 @@ class Spider:
         except:
             return False
     
-    async def _run(self, task_queue, worker_queue):
+    async def _schedule(self, task_queue, position_queue):
         """执行任务调度"""
 
         while True:
             url = await task_queue.get()
-            await worker_queue.get()
+            self._handling.append(url)
+            await position_queue.get()
             await self._free_queue.get()
-            asyncio.create_task(self._crawl_document(url))
+            task = asyncio.create_task(self._crawl_document(url))
+            self._running_task[url] = task
             self._free_queue.task_done()
+            position_queue.task_done()
+            task_queue.task_done()
 
     def _gzip_decompress(self, data):
         """gzip解压缩"""
@@ -146,15 +157,6 @@ class Spider:
             return await asyncio.open_connection(u.host, u.port, ssl=data)
         except:
             return None, None
-
-    async def _close(self, w):
-        """关闭连接"""
-
-        try:
-            w.close()
-            await w.wait_closed()
-        except:
-            pass
     
     async def add_task(self, *urls):
         """添加新任务"""
@@ -166,17 +168,16 @@ class Spider:
                 if hash_value not in self._handled_urls:
                     self._handled_urls.add(hash_value)
                     u = URL(url)
-                    if self._worker.get(u.host):
+                    if self._free_domain.get(u.host):
                         await self._task[u.host].put(url)
                     else:
-                        loop = asyncio.get_running_loop()
-                        self._worker[u.host] = Queue(self.MAX_REQUEST_DOMAIN, loop=loop)
+                        self._free_domain[u.host] = Queue(self.MAX_REQUEST_DOMAIN)
                         for _ in range(self.MAX_REQUEST_DOMAIN):
-                            await self._worker[u.host].put(1)
+                            await self._free_domain[u.host].put(1)
 
-                        self._task[u.host] = Queue(loop=loop)
+                        self._task[u.host] = Queue()
                         await self._task[u.host].put(url)
-                        asyncio.create_task(self._run(self._task[u.host], self._worker[u.host]))
+                        asyncio.create_task(self._schedule(self._task[u.host], self._free_domain[u.host]))
     
     def _get_header(self, url, **param):
         u = URL(url)
@@ -231,6 +232,18 @@ class Spider:
 
         return content
     
+    async def _check_task_done(self):
+        """检查任务是否完成"""
+
+        if self._free_queue.qsize() == self.MAX_REQUEST_TOTAL:
+            for _, value in self._task.items():
+                if value.empty():
+                    continue
+                else:
+                    break
+            else:
+                self._task_done.set_result(1)
+    
     async def _crawl_document(self, url):
         """爬取文档"""
 
@@ -238,12 +251,15 @@ class Spider:
         reader, writer = await self._get_connector(url)
         if not reader or not writer:
             Logger.log(f'GET {url}失败，无法连接主机！')
-            self._task[u.host].task_done()
-            self._worker[u.host].task_done()
-            await self._worker[u.host].put(1)
+            await self._free_domain[u.host].put(1)
             await self._free_queue.put(1)
-            if self._free_queue.qsize() == self.MAX_REQUEST_TOTAL:
-                self._task_done.set_result(1)
+            # 检查任务是否完成
+            await self._check_task_done()
+            try:
+                self._handling.remove(url)
+                self._running_task.pop(url)
+            except:
+                pass
             return
 
         try:
@@ -253,13 +269,17 @@ class Spider:
             response_header = await reader.readuntil(b'\r\n\r\n')
             if not response_header:
                 Logger.log(f'GET {url}失败，连接已断开！')
-                self._task[u.host].task_done()
-                self._worker[u.host].task_done()
-                await self._worker[u.host].put(1)
+                await self._free_domain[u.host].put(1)
                 await self._free_queue.put(1)
-                await self._close(writer)
-                if self._free_queue.qsize() == self.MAX_REQUEST_TOTAL:
-                    self._task_done.set_result(1)
+                writer.close()
+                await writer.wait_closed()
+                # 检查任务是否完成
+                await self._check_task_done()
+                try:
+                    self._handling.remove(url)
+                    self._running_task.pop(url)
+                except:
+                    pass
                 return
 
             response = Response(url, response_header)
@@ -268,7 +288,7 @@ class Spider:
             if transfer_encoding == 'chunked':
                 body = await self._read_chunk_data(reader)
             else:
-                content_length = int(response.get('Content-Length', '0')
+                content_length = int(response.get('Content-Length', '0'))
                 body = await reader.readexactly(content_length)
             
             # 内容编码
@@ -285,13 +305,17 @@ class Spider:
         except Exception as e:
             Logger.log(f'未知错误：{e}')
         finally:
-            self._task[u.host].task_done()
-            self._worker[u.host].task_done()
-            await self._worker[u.host].put(1)
+            await self._free_domain[u.host].put(1)
             await self._free_queue.put(1)
-            await self._close(writer)
-            if self._free_queue.qsize() == self.MAX_REQUEST_TOTAL:
-                self._task_done.set_result(1)
+            writer.close()
+            await writer.wait_closed()
+            # 检查任务是否完成
+            await self._check_task_done()
+            try:
+                self._handling.remove(url)
+                self._running_task.pop(url)
+            except:
+                pass
     
     def start(self, *urls):
         """开始爬取"""
