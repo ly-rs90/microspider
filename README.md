@@ -46,4 +46,7 @@ class DemoSpider(Spider):
             # 拼接获得绝对url并添加到任务队列
             await self.add_task(response.url_join(url))
 
+demo_spider = DemoSpider()
+demo_spider.start('www.abc.com')
+
 ```
