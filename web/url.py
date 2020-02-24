@@ -11,7 +11,6 @@ import hashlib
 from urllib.parse import urlsplit, urljoin
 
 
-
 class URL:
     """URL解析类"""
 

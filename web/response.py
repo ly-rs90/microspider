@@ -11,6 +11,7 @@ import re
 from .url import URL
 from ..log.logger import Logger
 
+
 class Response:
     """代表一个HTTP响应
        一个合法的HTTP响应应包含一个HTTP响应头
@@ -61,7 +62,8 @@ class Response:
             encoding = self.encoding if self.encoding else 'UTF-8'
             text = self._body.decode(encoding=encoding, errors='ignore')
             return text
-        except:
+        except Exception as e:
+            Logger.log(f'尝试解码响应体失败，详情：{e}')
             return ''
 
     @property

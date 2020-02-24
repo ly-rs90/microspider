@@ -7,15 +7,11 @@
 @Email:      ly_rs90@qq.com
 @Desc:       基于python标准库asyncio实现的异步爬虫
 """
-import hashlib
 import time
-import datetime
 import asyncio
 import ssl
 import gzip
 import zlib
-import random
-from urllib.parse import urlsplit
 from asyncio.queues import Queue
 from ..log.logger import Logger
 from ..web.url import URL
@@ -58,6 +54,9 @@ class Spider:
 
         # 完成的任务数
         self._completed = 0
+
+        # 任务开始标志
+        self._start = None
     
     async def add_task(self, *urls):
         """添加新任务"""
@@ -118,16 +117,19 @@ class Spider:
                 await task
             
             self._running_task.task_done()
-    
-    def _deflate_decompress(self, data):
+
+    @staticmethod
+    def _deflate_decompress(data):
         """deflate解压"""
 
         try:
             return zlib.decompress(data, -zlib.MAX_WBITS)
-        except:
+        except Exception as e:
+            Logger.log(f'deflate解压出错，详情：{e}')
             return None
 
-    async def _get_connector(self, url):
+    @staticmethod
+    async def _get_connector(url):
         """获取连接到web主机的传输对象"""
 
         u = URL(url)
@@ -142,10 +144,12 @@ class Spider:
             
         try:
             return await asyncio.open_connection(u.host, u.port, ssl=data)
-        except:
+        except Exception as e:
+            Logger.log(f'connect error) GET {url}\n详情：{e}')
             return None, None
-    
-    def _get_request_header(self, url, method='GET'):
+
+    @staticmethod
+    def _get_request_header(url, method='GET'):
         """根据url生成对应的HTTP请求头"""
 
         u = URL(url)
@@ -155,22 +159,24 @@ class Spider:
             query += '?'
 
         h = (
-            f'GET {u.path + "" if not query else query} HTTP/1.1\r\n'
+            f'{method} {u.path + "" if not query else query} HTTP/1.1\r\n'
             f'Host: {u.host}\r\n'
             'Connection: keep-alive\r\n'
             'Pragma: no-cache\r\n'
             'Cache-Control: no-cache\r\n'
             'Upgrade-Insecure-Requests: 1\r\n'
             f'User-Agent: {UserAgent.get_agent()}\r\n'
-            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9\r\n'
+            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,'
+            'image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9\r\n'
             'Accept-Language: zh-CN,zh;q=0.9\r\n'
             'Accept-Encoding: gzip, deflate\r\n'
             '\r\n'
         )
 
         return h
-    
-    async def _get_response_header(self, reader, url):
+
+    @staticmethod
+    async def _get_response_header(reader, url):
         """获取HTTP响应头"""
 
         try:
@@ -179,8 +185,9 @@ class Spider:
         except Exception as e:
             Logger.log(f'(read header error) GET {url}\n详情：{e}')
             return b''
-    
-    async def _get_chunk_data(self, reader, url):
+
+    @staticmethod
+    async def _get_chunk_data(reader, url):
         """获取分块传输的内容"""
 
         content = b''
@@ -194,11 +201,12 @@ class Spider:
                 chunk_line = await reader.readline()
         except Exception as e:
             content = b''
-            self._log(f'(read chunk body error) GET {url}\n详情：{e}')
+            Logger.log(f'(read chunk body error) GET {url}\n详情：{e}')
 
         return content
 
-    async def _get_body(self, reader, length, url):
+    @staticmethod
+    async def _get_body(reader, length, url):
         """获取length长度的响应体"""
 
         try:
@@ -207,13 +215,15 @@ class Spider:
         except Exception as e:
             Logger.log(f'(read body error) GET {url}\n详情：{e}')
             return b''
-    
-    def _gzip_decompress(self, data):
+
+    @staticmethod
+    def _gzip_decompress(data):
         """gzip解压"""
 
         try:
             return gzip.decompress(data)
-        except:
+        except Exception as e:
+            Logger.log(f'gzip解压出错，详情：{e}')
             return None
     
     async def _record(self):
@@ -226,7 +236,8 @@ class Spider:
             task_num = 0
             for key, v in self._url_queue.items():
                 task_num += v.qsize()
-            Logger.log(f'当前任务量：{task_num}。成功爬取文档：{self._completed}，平均速度：{round(self._completed/(now-self._base_time)*60, 2)}/min ')
+            Logger.log(f'已完成：{self._completed}，剩余任务：{task_num}，'
+                       f'平均速度：{round(self._completed/(now-self._base_time)*60, 2)}/min')
     
     async def _send_request_header(self, writer, url):
         """发送HTTP请求头"""
@@ -251,9 +262,10 @@ class Spider:
 
     async def _init(self):
         """初始化"""
-        
+        loop = asyncio.get_running_loop()
         self._work_position = asyncio.Semaphore(self.MAX_WORKER)
-        self._running_task = Queue(self.MAX_WORKER)
+        self._running_task = Queue()
+        self._start = loop.create_future()
         
         # 创建报告任务，每隔1分钟报告一次当前爬取状态
         asyncio.create_task(self._record())
@@ -266,13 +278,15 @@ class Spider:
         try:
             await self._init()
             await self.add_task(*url)
-            await asyncio.sleep(1)
+            await self._start
             await self._running_task.join()
 
             avg = self._completed / (time.time() - self._base_time) * 60
-            Logger.log(f'任务完成，共爬取资源：{self._completed}，平均速度：{round(avg, 2)}/min。耗时：{round(time.time()-self._base_time, 3)}s.')
+            Logger.log(f'任务完成，共获取资源：{self._completed}，平均速度：{round(avg, 2)}/min，'
+                       f'耗时：{round(time.time()-self._base_time, 3)}s.')
             return True
-        except:
+        except Exception as e:
+            Logger.log(f'运行任务失败，详情：{e}')
             return False
     
     async def _task_monitor(self, url_queue, worker):
@@ -288,13 +302,16 @@ class Spider:
             task = asyncio.create_task(self._download_document(url))
             # 将任务加到运行队列
             await self._running_task.put(task)
+
+            # 任务添加到运行队列后设置开始标志
+            if not self._start.done():
+                self._start.set_result(1)
     
     async def _download_document(self, url):
         """下载文档"""
 
         reader, writer = await self._get_connector(url)
         if not reader or not writer:
-            Logger.log(f'(connect error) GET {url}')
             self._task_done(url)
             return
 
