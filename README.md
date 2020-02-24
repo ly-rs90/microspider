@@ -33,7 +33,7 @@ class DemoSpider(Spider):
     # 允许的域名
     ALLOWED_DOMAIN = ['abc.com', 'abd.com']
 
-    async def handle_document(response):
+    async def handle_document(self, response):
         """唯一一个需要重写的方法
            该方法在文档成功获取后调用，
            重写该方法实现自定义操作，如继续爬取新的链接等。

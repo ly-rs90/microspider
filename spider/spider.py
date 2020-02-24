@@ -90,7 +90,7 @@ class Spider:
         重写该方法以实现自定义操作，如继续爬取相关链接
         示例：
         urls = re.findall(response.text)
-        self.add_task(*urls)      # 继续爬取新的链接
+        await self.add_task(*urls)      # 继续爬取新的链接
         """
         pass
     
